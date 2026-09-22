@@ -1,6 +1,4 @@
-// tracking.js - Quản lý tracking và đếm phương tiện giao thông
-
-import { updateUIStats } from './dashboard.js';
+// tracking.js - Quản lý tracking, gán ID và đếm phương tiện giao thông
 
 export const vehicleStats = {
     car: { left: 0, right: 0, total: 0 },
@@ -20,6 +18,10 @@ export function resetVehicleStats() {
 let trackedObjects = {};
 let nextObjectID = 1;
 let countedTrackIDs = new Set();
+
+export function getTrackedObjects() {
+    return trackedObjects;
+}
 
 export function matchAndCountVehicles(dets, canvasWidth, canvasHeight, lineY) {
     if (!dets || !Array.isArray(dets)) return;
@@ -49,9 +51,9 @@ export function matchAndCountVehicles(dets, canvasWidth, canvasHeight, lineY) {
 
         objectIDs.forEach(id => {
             let tObj = trackedObjects[id];
-            if (tObj.className === item.className) {
+            if (tObj && tObj.className === item.className) {
                 let dist = Math.hypot(tObj.centroid[0] - cx, tObj.centroid[1] - cy);
-                if (dist < minDist && dist < 80) { // Nới rộng khoảng cách nhận diện giữa các frame
+                if (dist < minDist && dist < 100) { // Khoảng cách tối đa giữa 2 frame liên tiếp
                     minDist = dist;
                     matchedID = id;
                 }
@@ -63,6 +65,7 @@ export function matchAndCountVehicles(dets, canvasWidth, canvasHeight, lineY) {
             let newY = cy;
             let countingLine = lineY || (canvasHeight / 2);
             
+            // Kiểm tra xem xe đã vượt qua vạch đếm chưa
             if (!countedTrackIDs.has(matchedID)) {
                 if ((oldY < countingLine && newY >= countingLine) || (oldY > countingLine && newY <= countingLine)) {
                     let type = item.className;
@@ -85,8 +88,11 @@ export function matchAndCountVehicles(dets, canvasWidth, canvasHeight, lineY) {
         }
     });
 
+    // Dọn dẹp các đối tượng mất tích quá lâu trên khung hình
     Object.keys(trackedObjects).forEach(id => {
         trackedObjects[id].lastSeen++;
-        if (trackedObjects[id].lastSeen > 30) delete trackedObjects[id];
+        if (trackedObjects[id].lastSeen > 25) {
+            delete trackedObjects[id];
+        }
     });
 }
