@@ -25,7 +25,7 @@ let nextObjectID = 1;
 let countedTrackIDs = new Set(); // Đảm bảo mỗi xe chỉ đếm 1 lần khi qua vạch
 
 export function matchAndCountVehicles(dets, canvasWidth, canvasHeight, lineY) {
-    // 1. KIỂM TRA AN TOÀN: Tránh lỗi undefined is not iterable
+    // 1. BẢO VỆ AN TOÀN: Nếu dets không phải là mảng hoặc rỗng thì return ngay, tránh crash
     if (!dets || !Array.isArray(dets)) {
         return;
     }
@@ -34,6 +34,7 @@ export function matchAndCountVehicles(dets, canvasWidth, canvasHeight, lineY) {
 
     // Lấy tọa độ trung tâm của các đối tượng vừa detect được trong frame hiện tại
     dets.forEach(det => {
+        if (!det.box || det.box.length < 4) return;
         let [x1, y1, x2, y2] = det.box;
         let cx = (x1 + x2) / 2;
         let cy = (y1 + y2) / 2;
@@ -61,7 +62,6 @@ export function matchAndCountVehicles(dets, canvasWidth, canvasHeight, lineY) {
         return;
     }
 
-    // Thuật toán gán ID dựa trên khoảng cách (Centroid Tracking đơn giản)
     let objectIDs = Object.keys(trackedObjects);
     
     currentCentroids.forEach(item => {
@@ -71,10 +71,9 @@ export function matchAndCountVehicles(dets, canvasWidth, canvasHeight, lineY) {
 
         objectIDs.forEach(id => {
             let tObj = trackedObjects[id];
-            // Chỉ so sánh các xe cùng loại để tránh nhầm ID
             if (tObj.className === item.className) {
                 let dist = Math.hypot(tObj.centroid[0] - cx, tObj.centroid[1] - cy);
-                if (dist < minDist && dist < 50) { // Ngưỡng khoảng cách tối đa để nhận diện cùng một xe
+                if (dist < minDist && dist < 60) {
                     minDist = dist;
                     matchedID = id;
                 }
@@ -82,22 +81,15 @@ export function matchAndCountVehicles(dets, canvasWidth, canvasHeight, lineY) {
         });
 
         if (matchedID !== null) {
-            // Cập nhật vị trí mới cho đối tượng cũ
             let oldY = trackedObjects[matchedID].centroid[1];
             let newY = cy;
-            
-            // Xử lý logic đếm khi xe cắt qua vạch đếm (lineY)
-            // lineY mặc định hoặc vị trí vạch ngang trên màn hình
             let countingLine = lineY || (canvasHeight / 2);
             
             if (!countedTrackIDs.has(matchedID)) {
-                // Kiểm tra nếu xe đi từ trên xuống hoặc dưới lên cắt qua vạch đếm
                 if ((oldY < countingLine && newY >= countingLine) || (oldY > countingLine && newY <= countingLine)) {
                     let type = item.className;
                     if (vehicleStats[type]) {
-                        // Phân làn trái / phải dựa vào vị trí trục X so với tâm màn hình
                         let isLeft = cx < (canvasWidth / 2);
-                        
                         if (isLeft) {
                             vehicleStats[type].left++;
                         } else {
@@ -114,7 +106,6 @@ export function matchAndCountVehicles(dets, canvasWidth, canvasHeight, lineY) {
             trackedObjects[matchedID].centroid = [cx, cy];
             trackedObjects[matchedID].lastSeen = 0;
         } else {
-            // Đăng ký đối tượng mới xuất hiện
             trackedObjects[nextObjectID] = {
                 centroid: [cx, cy],
                 className: item.className,
@@ -125,10 +116,10 @@ export function matchAndCountVehicles(dets, canvasWidth, canvasHeight, lineY) {
         }
     });
 
-    // Dọn dẹp các đối tượng đã biến mất khỏi khung hình quá lâu
+    // Dọn dẹp các đối tượng đã biến mất khỏi khung hình
     Object.keys(trackedObjects).forEach(id => {
         trackedObjects[id].lastSeen++;
-        if (trackedObjects[id].lastSeen > 15) { // Quá 15 khung hình không thấy thì xóa
+        if (trackedObjects[id].lastSeen > 20) {
             delete trackedObjects[id];
         }
     });

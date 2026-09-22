@@ -1,116 +1,113 @@
-let session = null;
+// model.js - Quản lý tải mô hình ONNX Runtime Web và xử lý suy luận YOLOv10
 
-const classConfidenceThresholds = {
-    motorcycle: 0.10,
-    car: 0.15,
-    bus: 0.45,
-    truck: 0.25
-};
+export let session = null;
+const CLASSES = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck']; 
+// Hoặc danh mục class tương ứng với mô hình YOLOv10 của bạn
 
-const classMap = { 2: 'car', 3: 'motorcycle', 5: 'bus', 7: 'truck' };
-
-export { session, classConfidenceThresholds, classMap };
-
-export async function loadModel(setStatus, onReady) {
+export async function loadModel(setStatusCallback, onReadyCallback) {
     try {
-        setStatus('ready', 'LOADING...');
-        ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
-        session = await ort.InferenceSession.create('./yolov10n.onnx', { executionProviders: ['wasm'] });
-        setStatus('ready', 'AI READY');
-        onReady();
-    } catch (error) {
-        console.error('Không thể tải model:', error);
-        setStatus('stopped', 'AI ERROR');
+        if (setStatusCallback) setStatusCallback('loading', 'ĐANG TẢI MÔ HÌNH AI...');
+        
+        // Cấu hình đường dẫn ort nếu dùng CDN
+        if (typeof ort !== 'undefined') {
+            ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/';
+            session = await ort.InferenceSession.create('./yolov10n.onnx', { executionProviders: ['wasm'] });
+        } else {
+            throw new Error('ONNX Runtime chưa được tải vào trang.');
+        }
+
+        if (setStatusCallback) setStatusCallback('ready', 'MÔ HÌNH SẴN SÀNG');
+        if (onReadyCallback) onReadyCallback();
+    } catch (e) {
+        console.error('Không thể tải mô hình ONNX:', e);
+        if (setStatusCallback) setStatusCallback('error', 'LỖI TẢI MODEL AI');
     }
 }
 
-export function preprocessWithLetterbox(srcCanvas, targetSize = 640) {
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = targetSize;
-    tempCanvas.height = targetSize;
-    const tempContext = tempCanvas.getContext('2d');
-    const sourceWidth = srcCanvas.width;
-    const sourceHeight = srcCanvas.height;
-    const ratio = Math.min(targetSize / sourceWidth, targetSize / sourceHeight);
-    const resizedWidth = sourceWidth * ratio;
-    const resizedHeight = sourceHeight * ratio;
-    const offsetX = (targetSize - resizedWidth) / 2;
-    const offsetY = (targetSize - resizedHeight) / 2;
+export function preprocessWithLetterbox(canvas, targetSize = 640) {
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
 
-    tempContext.fillStyle = '#111827';
-    tempContext.fillRect(0, 0, targetSize, targetSize);
-    tempContext.drawImage(srcCanvas, offsetX, offsetY, resizedWidth, resizedHeight);
+    const targetW = targetSize;
+    const targetH = targetSize;
 
-    const imageData = tempContext.getImageData(0, 0, targetSize, targetSize);
-    const data = imageData.data;
-    const float32Data = new Float32Array(3 * targetSize * targetSize);
-    for (let index = 0; index < targetSize * targetSize; index++) {
-        float32Data[index] = data[index * 4] / 255.0;
-        float32Data[targetSize * targetSize + index] = data[index * 4 + 1] / 255.0;
-        float32Data[2 * targetSize * targetSize + index] = data[index * 4 + 2] / 255.0;
+    const ratio = Math.min(targetW / width, targetH / height);
+    const newW = Math.round(width * ratio);
+    const newH = Math.round(height * ratio);
+
+    const dw = (targetW - newW) / 2;
+    const dh = (targetH - newH) / 2;
+
+    const offscreen = document.createElement('canvas');
+    offscreen.width = targetW;
+    offscreen.height = targetH;
+    const oCtx = offscreen.getContext('2d');
+
+    oCtx.fillStyle = '#000000';
+    oCtx.fillRect(0, 0, targetW, targetH);
+    oCtx.drawImage(canvas, 0, 0, width, height, dw, dh, newW, newH);
+
+    const imgData = oCtx.getImageData(0, 0, targetW, targetH);
+    const { data } = imgData;
+    
+    const float32Data = new Float32Array(3 * targetW * targetH);
+    for (let i = 0; i < targetW * targetH; i++) {
+        float32Data[i] = data[i * 4] / 255.0;                     // R
+        float32Data[targetW * targetH + i] = data[i * 4 + 1] / 255.0; // G
+        float32Data[2 * targetW * targetH + i] = data[i * 4 + 2] / 255.0; // B
     }
 
-    return {
-        tensor: new ort.Tensor('float32', float32Data, [1, 3, targetSize, targetSize]),
-        ratio,
-        dw: offsetX,
-        dh: offsetY
-    };
+    const tensor = new ort.Tensor('float32', float32Data, [1, 3, targetH, targetW]);
+    return { tensor, ratio, dw, dh };
 }
 
-export function parseYolov10Output(output, originalWidth, originalHeight, ratio, offsetX, offsetY) {
-    const detections = [];
-    if (!output || !output.data || !output.dims || output.dims.length !== 3) {
-        throw new Error('Output model không đúng định dạng 3 chiều');
+export function parseYolov10Output(outputTensor, originalWidth, originalHeight, ratio, dw, dh) {
+    // LUÔN TRẢ VỀ MẢNG RỖNG NẾU OUTPUT KHÔNG HỢP LỆ ĐỂ TRÁNH LỖI UNDEFINED
+    if (!outputTensor || !outputTensor.data) {
+        return [];
     }
 
-    const data = output.data;
-    const dims = output.dims;
-    const parseBox = (x1, y1, x2, y2, confidence, classId) => {
-        if (![x1, y1, x2, y2, confidence, classId].every(Number.isFinite)) return;
-        if (Math.max(Math.abs(x1), Math.abs(y1), Math.abs(x2), Math.abs(y2)) <= 1.5) {
-            x1 *= 640;
-            y1 *= 640;
-            x2 *= 640;
-            y2 *= 640;
-        }
+    let dets = [];
+    const data = outputTensor.data;
+    const dims = outputTensor.dims; // Thường là [1, num_boxes, 6] hoặc tương tự
 
-        let resolvedX1 = (x1 - offsetX) / ratio;
-        let resolvedY1 = (y1 - offsetY) / ratio;
-        let resolvedX2 = (x2 - offsetX) / ratio;
-        let resolvedY2 = (y2 - offsetY) / ratio;
-        resolvedX1 = Math.max(0, Math.min(originalWidth, resolvedX1));
-        resolvedY1 = Math.max(0, Math.min(originalHeight, resolvedY1));
-        resolvedX2 = Math.max(0, Math.min(originalWidth, resolvedX2));
-        resolvedY2 = Math.max(0, Math.min(originalHeight, resolvedY2));
+    // Duyệt qua tensor đầu ra của YOLOv10 (giả định định dạng [x1, y1, x2, y2, score, class_id])
+    const numBoxes = dims[1] || (data.length / 6);
+    
+    for (let i = 0; i < numBoxes; i++) {
+        const offset = i * 6;
+        let x1 = data[offset];
+        let y1 = data[offset + 1];
+        let x2 = data[offset + 2];
+        let y2 = data[offset + 3];
+        let score = data[offset + 4];
+        let classId = Math.round(data[offset + 5]);
 
-        const width = resolvedX2 - resolvedX1;
-        const height = resolvedY2 - resolvedY1;
-        if (width < 2 || height < 2) return;
+        // Lọc ngưỡng độ tin cậy cơ bản
+        if (score < 0.25) continue;
 
-        const className = classMap[classId];
-        if (className) {
-            const threshold = classConfidenceThresholds[className] || 0.25;
-            if (confidence >= threshold) {
-                detections.push({
-                    bbox: [resolvedX1, resolvedY1, width, height],
-                    className,
-                    confidence
-                });
-            }
-        }
-    };
+        // Chuyển đổi tọa độ về kích thước ảnh gốc
+        x1 = (x1 - dw) / ratio;
+        y1 = (y1 - dh) / ratio;
+        x2 = (x2 - dw) / ratio;
+        y2 = (y2 - dh) / ratio;
 
-    if (dims[2] === 6) {
-        for (let index = 0; index < dims[1]; index++) {
-            const offset = index * 6;
-            parseBox(data[offset], data[offset + 1], data[offset + 2], data[offset + 3], data[offset + 4], Math.round(data[offset + 5]));
-        }
-    } else if (dims[1] === 6) {
-        for (let index = 0; index < dims[2]; index++) {
-            parseBox(data[index], data[dims[2] + index], data[2 * dims[2] + index], data[3 * dims[2] + index], data[4 * dims[2] + index], data[5 * dims[2] + index]);
-        }
+        // Map classId sang tên phương tiện (chỉ lấy car, motorcycle, bus, truck)
+        let rawClassName = CLASSES[classId] || 'car';
+        let className = 'car';
+        if (rawClassName === 'motorcycle' || rawClassName === 'motorbike') className = 'motorcycle';
+        else if (rawClassName === 'bus') className = 'bus';
+        else if (rawClassName === 'truck') className = 'truck';
+        else if (rawClassName === 'car') className = 'car';
+        else continue; // Bỏ qua các class không phải xe giao thông
+
+        dets.push({
+            box: [x1, y1, x2, y2],
+            score: score,
+            className: className
+        });
     }
 
-    return detections;
+    return dets;
 }
