@@ -1,4 +1,4 @@
-// video.js - Quản lý nguồn video, camera, vòng lặp AI và tính FPS
+// video.js - Quản lý nguồn video, vòng lặp AI, vẽ khung nhận diện và đếm phương tiện
 
 import { canvas, ctx, inferenceCanvas, inferenceCtx, isRunning, setRunning, isInferencing, setInferencing } from './main.js';
 import { session, preprocessWithLetterbox, parseYolov10Output } from './model.js';
@@ -8,6 +8,7 @@ import { updateUIStats, setStatus } from './dashboard.js';
 let videoElement = null;
 let lastTime = performance.now();
 let frameCount = 0;
+let latestDetections = []; // Lưu lại kết quả nhận diện mới nhất để vẽ liên tục
 
 export function initVideoModule() {
     videoElement = document.getElementById('video-source');
@@ -47,6 +48,7 @@ export function resetSystem() {
     stopAI();
     resetVehicleStats();
     updateUIStats();
+    latestDetections = [];
     if (videoElement && videoElement.src) {
         videoElement.currentTime = 0;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -72,9 +74,36 @@ function processFrame() {
     }
 
     // 1. Vẽ frame video lên canvas chính
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
 
-    // 2. Gửi sang luồng AI ngầm để xử lý
+    // 2. Vẽ vạch đếm xe màu đỏ ngang màn hình (Ví dụ ở vị trí 50 chiều cao canvas)
+    const lineY = canvas.height * 0.5;
+    ctx.strokeStyle = '#ff3b30';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, lineY);
+    ctx.lineTo(canvas.width, lineY);
+    ctx.stroke();
+
+    // 3. Vẽ lại các khung bounding box của xe đã detect lên màn hình
+    if (Array.isArray(latestDetections) && latestDetections.length > 0) {
+        latestDetections.forEach(det => {
+            let [x1, y1, x2, y2] = det.box;
+            
+            // Vẽ hộp nhận diện
+            ctx.strokeStyle = '#00ffcc';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+            // Vẽ nhãn tên xe và độ tự tin
+            ctx.fillStyle = '#00ffcc';
+            ctx.font = '14px Arial';
+            ctx.fillText(`${det.className} (${(det.score * 100).toFixed(0)}%)`, x1, Math.max(y1 - 5, 15));
+        });
+    }
+
+    // 4. Gửi sang luồng AI ngầm để xử lý liên tục
     if (!isInferencing() && session) {
         setInferencing(true);
         inferenceCtx.drawImage(videoElement, 0, 0, inferenceCanvas.width, inferenceCanvas.height);
@@ -84,15 +113,12 @@ function processFrame() {
                 const { tensor, ratio, dw, dh } = preprocessWithLetterbox(inferenceCanvas, 640);
                 const results = await session.run({ [session.inputNames[0]]: tensor });
                 
-                // Lấy output tensor an toàn
                 const outputTensor = results[session.outputNames[0]];
-                
-                // Gọi parse và kiểm tra mảng trả về
                 const dets = parseYolov10Output(outputTensor, canvas.width, canvas.height, ratio, dw, dh);
                 
-                // Chỉ chạy tracking nếu dets thực sự là một mảng hợp lệ
-                if (Array.isArray(dets) && dets.length > 0) {
-                    matchAndCountVehicles(dets, canvas.width, canvas.height, 30);
+                if (Array.isArray(dets)) {
+                    latestDetections = dets; // Lưu lại để vẽ ở frame tiếp theo
+                    matchAndCountVehicles(dets, canvas.width, canvas.height, lineY);
                     updateUIStats();
                 }
             } catch (err) {
