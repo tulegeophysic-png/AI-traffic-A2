@@ -71,11 +71,11 @@ function processFrame() {
         lastTime = now;
     }
 
-    // Vẽ frame hiện tại lên màn hình chính
+    // 1. Vẽ frame video lên canvas chính
     ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
 
-    // Gửi sang luồng AI ngầm để không giật khung hình
-    if (!isInferencing()) {
+    // 2. Gửi sang luồng AI ngầm để xử lý
+    if (!isInferencing() && session) {
         setInferencing(true);
         inferenceCtx.drawImage(videoElement, 0, 0, inferenceCanvas.width, inferenceCanvas.height);
         
@@ -83,14 +83,20 @@ function processFrame() {
             try {
                 const { tensor, ratio, dw, dh } = preprocessWithLetterbox(inferenceCanvas, 640);
                 const results = await session.run({ [session.inputNames[0]]: tensor });
-                const dets = parseYolov10Output(results[session.outputNames[0]], canvas.width, canvas.height, ratio, dw, dh);
                 
-                matchAndCountVehicles(dets, canvas.width, canvas.height, 30);
-                updateUIStats();
+                // Lấy output tensor an toàn
+                const outputTensor = results[session.outputNames[0]];
+                
+                // Gọi parse và kiểm tra mảng trả về
+                const dets = parseYolov10Output(outputTensor, canvas.width, canvas.height, ratio, dw, dh);
+                
+                // Chỉ chạy tracking nếu dets thực sự là một mảng hợp lệ
+                if (Array.isArray(dets) && dets.length > 0) {
+                    matchAndCountVehicles(dets, canvas.width, canvas.height, 30);
+                    updateUIStats();
+                }
             } catch (err) {
                 console.error('Lỗi khi xử lý frame AI:', err);
-                setStatus('error', 'LỖI AI');
-                stopAI();
             } finally {
                 setInferencing(false);
             }
