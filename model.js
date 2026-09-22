@@ -2,15 +2,17 @@
 
 export let session = null;
 const CLASSES = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck']; 
-// Hoặc danh mục class tương ứng với mô hình YOLOv10 của bạn
 
 export async function loadModel(setStatusCallback, onReadyCallback) {
     try {
         if (setStatusCallback) setStatusCallback('loading', 'ĐANG TẢI MÔ HÌNH AI...');
         
-        // Cấu hình đường dẫn ort nếu dùng CDN
         if (typeof ort !== 'undefined') {
-            ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/';
+            // Cấu hình bắt buộc để tránh lỗi thiếu file jsep.mjs từ CDN
+            ort.env.wasm.numThreads = 1;
+            ort.env.wasm.simd = false; 
+            
+            // Khởi tạo session từ file onnx trong thư mục gốc
             session = await ort.InferenceSession.create('./yolov10n.onnx', { executionProviders: ['wasm'] });
         } else {
             throw new Error('ONNX Runtime chưa được tải vào trang.');
@@ -63,16 +65,14 @@ export function preprocessWithLetterbox(canvas, targetSize = 640) {
 }
 
 export function parseYolov10Output(outputTensor, originalWidth, originalHeight, ratio, dw, dh) {
-    // LUÔN TRẢ VỀ MẢNG RỖNG NẾU OUTPUT KHÔNG HỢP LỆ ĐỂ TRÁNH LỖI UNDEFINED
     if (!outputTensor || !outputTensor.data) {
         return [];
     }
 
     let dets = [];
     const data = outputTensor.data;
-    const dims = outputTensor.dims; // Thường là [1, num_boxes, 6] hoặc tương tự
+    const dims = outputTensor.dims; 
 
-    // Duyệt qua tensor đầu ra của YOLOv10 (giả định định dạng [x1, y1, x2, y2, score, class_id])
     const numBoxes = dims[1] || (data.length / 6);
     
     for (let i = 0; i < numBoxes; i++) {
@@ -84,23 +84,20 @@ export function parseYolov10Output(outputTensor, originalWidth, originalHeight, 
         let score = data[offset + 4];
         let classId = Math.round(data[offset + 5]);
 
-        // Lọc ngưỡng độ tin cậy cơ bản
         if (score < 0.25) continue;
 
-        // Chuyển đổi tọa độ về kích thước ảnh gốc
         x1 = (x1 - dw) / ratio;
         y1 = (y1 - dh) / ratio;
         x2 = (x2 - dw) / ratio;
         y2 = (y2 - dh) / ratio;
 
-        // Map classId sang tên phương tiện (chỉ lấy car, motorcycle, bus, truck)
         let rawClassName = CLASSES[classId] || 'car';
         let className = 'car';
         if (rawClassName === 'motorcycle' || rawClassName === 'motorbike') className = 'motorcycle';
         else if (rawClassName === 'bus') className = 'bus';
         else if (rawClassName === 'truck') className = 'truck';
         else if (rawClassName === 'car') className = 'car';
-        else continue; // Bỏ qua các class không phải xe giao thông
+        else continue; 
 
         dets.push({
             box: [x1, y1, x2, y2],
