@@ -1,8 +1,8 @@
-// video.js - Vòng lặp video, render khung AI và kích hoạt đếm xe
+// video.js - Quản lý nguồn video, vòng lặp AI, vẽ khung, hiển thị ID và đếm trực tiếp
 
 import { canvas, ctx, inferenceCanvas, inferenceCtx, isRunning, setRunning, isInferencing, setInferencing } from './main.js';
 import { session, preprocessWithLetterbox, parseYolov10Output } from './model.js';
-import { matchAndCountVehicles, vehicleStats, resetVehicleStats } from './tracking.js';
+import { matchAndCountVehicles, vehicleStats, resetVehicleStats, getTrackedObjects } from './tracking.js';
 import { updateUIStats, setStatus } from './dashboard.js';
 
 let videoElement = null;
@@ -73,20 +73,11 @@ function processFrame() {
         lastTime = now;
     }
 
-    // 1. Vẽ video lên canvas chính
+    // 1. Vẽ frame video lên canvas chính
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
 
-    // 2. Vẽ vạch đếm màu đỏ ngang màn hình (ở vị trí 50% chiều cao)
-    const lineY = canvas.height * 0.5;
-    ctx.strokeStyle = '#ff3b30';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(0, lineY);
-    ctx.lineTo(canvas.width, lineY);
-    ctx.stroke();
-
-    // 3. Vẽ các khung nhận diện (Bounding Boxes) lên canvas
+    // 2. Vẽ các khung nhận diện (Bounding Boxes) lên canvas
     if (Array.isArray(latestDetections) && latestDetections.length > 0) {
         latestDetections.forEach(det => {
             let [x1, y1, x2, y2] = det.box;
@@ -96,8 +87,24 @@ function processFrame() {
             ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
 
             ctx.fillStyle = '#00ffcc';
-            ctx.font = '14px Arial';
+            ctx.font = '13px Arial';
             ctx.fillText(`${det.className} (${(det.score * 100).toFixed(0)}%)`, x1, Math.max(y1 - 5, 15));
+        });
+    }
+
+    // 3. Hiển thị ID Tracking trực quan lên xe đang chạy
+    if (typeof getTrackedObjects === 'function') {
+        const trackedObjs = getTrackedObjects();
+        Object.entries(trackedObjs).forEach(([id, obj]) => {
+            let [cx, cy] = obj.centroid;
+            ctx.fillStyle = '#ff00ff';
+            ctx.beginPath();
+            ctx.arc(cx, cy, 4, 0, 2 * Math.PI);
+            ctx.fill();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 12px Arial';
+            ctx.fillText(`ID: ${id}`, cx + 6, cy + 4);
         });
     }
 
@@ -116,7 +123,8 @@ function processFrame() {
                 
                 if (Array.isArray(dets)) {
                     latestDetections = dets;
-                    matchAndCountVehicles(dets, canvas.width, canvas.height, lineY);
+                    // Gọi tracking và đếm trực tiếp không cần vạch
+                    matchAndCountVehicles(dets, canvas.width, canvas.height);
                     updateUIStats();
                 }
             } catch (err) {
