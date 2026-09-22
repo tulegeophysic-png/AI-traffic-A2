@@ -1,9 +1,8 @@
-// tracking.js - Quản lý Centroid Tracker, Phân làn Trái/Phải và Tính tốc độ phương tiện
+// tracking.js - Quản lý thuật toán Centroid Tracker, phân làn và đếm phương tiện giao thông
 
-let nextVehicleId = 1;
-let trackedVehicles = new Map(); // Lưu trữ các xe đang tracking: Map<id, {x1, y1, x2, y2, class, lane, speed, counted}>
+import { updateUIStats } from './dashboard.js';
 
-// Thống kê đếm xe theo phân loại và làn
+// Đối tượng lưu trữ thống kê số liệu xe
 export const vehicleStats = {
     car: { left: 0, right: 0, total: 0 },
     motorcycle: { left: 0, right: 0, total: 0 },
@@ -11,131 +10,126 @@ export const vehicleStats = {
     truck: { left: 0, right: 0, total: 0 }
 };
 
+// Đặt lại toàn bộ số liệu thống kê về 0
 export function resetVehicleStats() {
     for (let key in vehicleStats) {
         vehicleStats[key].left = 0;
         vehicleStats[key].right = 0;
         vehicleStats[key].total = 0;
     }
-    trackedVehicles.clear();
-    nextVehicleId = 1;
 }
 
-/**
- * Xác định xe thuộc Làn Trái hay Làn Phải dựa vào vị trí trung tâm theo chiều ngang của khung hình
- */
-function determineLane(x1, x2, frameWidth = 1280) {
-    const centerX = (x1 + x2) / 2;
-    const splitX = frameWidth / 2; // Ranh giới chia đôi màn hình thành 2 làn
-    return centerX < splitX ? 'left' : 'right';
-}
+// Lưu trữ trạng thái tracking các đối tượng qua các frame
+let trackedObjects = {};
+let nextObjectID = 1;
+let countedTrackIDs = new Set(); // Đảm bảo mỗi xe chỉ đếm 1 lần khi qua vạch
 
-/**
- * Tính vận tốc (km/h) dựa trên quãng đường dịch chuyển pixel giữa các frame
- */
-function calculateSpeed(prevX, prevY, currX, currY, fps = 30) {
-    const pixelDistance = Math.hypot(currX - prevX, currY - prevY);
-    
-    // Hệ số quy đổi pixel ra mét (Calibration). Có thể tinh chỉnh theo góc quay camera thực tế.
-    const METERS_PER_PIXEL = 0.05; 
-    const distanceMeters = pixelDistance * METERS_PER_PIXEL;
+export function matchAndCountVehicles(dets, canvasWidth, canvasHeight, lineY) {
+    // 1. KIỂM TRA AN TOÀN: Tránh lỗi undefined is not iterable
+    if (!dets || !Array.isArray(dets)) {
+        return;
+    }
 
-    const timeInterval = 1 / fps; 
-    if (timeInterval <= 0) return 0;
+    let currentCentroids = [];
 
-    const speedMps = distanceMeters / timeInterval;
-    let speedKmh = speedMps * 3.6;
-
-    if (speedKmh < 3) speedKmh = 0; // Lọc nhiễu khi xe đứng yên
-    return Math.round(speedKmh);
-}
-
-/**
- * Thực hiện ghép nối ID xe qua từng frame, phân làn, tính tốc độ và đếm xe
- */
-export function matchAndCountVehicles(detections, frameWidth = 1280, frameHeight = 720, currentFps = 30) {
-    const currentFrameVehicles = [];
-
-    detections.forEach(det => {
-        const [x1, y1, x2, y2] = det.box;
-        const centerX = (x1 + x2) / 2;
-        const centerY = (y1 + y2) / 2;
-        const lane = determineLane(x1, x2, frameWidth);
-
-        currentFrameVehicles.push({
-            x1, y1, x2, y2,
-            centerX, centerY,
-            class: det.class.toLowerCase(),
-            score: det.score,
-            lane,
-            assigned: false
+    // Lấy tọa độ trung tâm của các đối tượng vừa detect được trong frame hiện tại
+    dets.forEach(det => {
+        let [x1, y1, x2, y2] = det.box;
+        let cx = (x1 + x2) / 2;
+        let cy = (y1 + y2) / 2;
+        let className = det.className; // 'car', 'motorcycle', 'bus', 'truck'
+        
+        currentCentroids.push({
+            centroid: [cx, cy],
+            box: det.box,
+            className: className,
+            score: det.score
         });
     });
 
-    const updatedTrackedVehicles = new Map();
+    // Nếu chưa có đối tượng nào đang tracking, khởi tạo mới
+    if (Object.keys(trackedObjects).length === 0) {
+        currentCentroids.forEach(item => {
+            trackedObjects[nextObjectID] = {
+                centroid: item.centroid,
+                className: item.className,
+                counted: false,
+                lastSeen: 0
+            };
+            nextObjectID++;
+        });
+        return;
+    }
 
-    currentFrameVehicles.forEach(curr => {
-        let bestMatchId = null;
-        let minDistance = 60; // Ngưỡng khoảng cách tối đa để nhận diện cùng một xe
+    // Thuật toán gán ID dựa trên khoảng cách (Centroid Tracking đơn giản)
+    let objectIDs = Object.keys(trackedObjects);
+    
+    currentCentroids.forEach(item => {
+        let [cx, cy] = item.centroid;
+        let minDist = Infinity;
+        let matchedID = null;
 
-        trackedVehicles.forEach((tracked, id) => {
-            if (tracked.class === curr.class && !tracked.assigned) {
-                const dist = Math.hypot(curr.centerX - tracked.centerX, curr.centerY - tracked.centerY);
-                if (dist < minDistance) {
-                    minDistance = dist;
-                    bestMatchId = id;
+        objectIDs.forEach(id => {
+            let tObj = trackedObjects[id];
+            // Chỉ so sánh các xe cùng loại để tránh nhầm ID
+            if (tObj.className === item.className) {
+                let dist = Math.hypot(tObj.centroid[0] - cx, tObj.centroid[1] - cy);
+                if (dist < minDist && dist < 50) { // Ngưỡng khoảng cách tối đa để nhận diện cùng một xe
+                    minDist = dist;
+                    matchedID = id;
                 }
             }
         });
 
-        if (bestMatchId !== null) {
-            const tracked = trackedVehicles.get(bestMatchId);
+        if (matchedID !== null) {
+            // Cập nhật vị trí mới cho đối tượng cũ
+            let oldY = trackedObjects[matchedID].centroid[1];
+            let newY = cy;
             
-            // Tính toán và làm mượt tốc độ
-            const instantaneousSpeed = calculateSpeed(tracked.centerX, tracked.centerY, curr.centerX, curr.centerY, currentFps);
-            tracked.speed = tracked.speed ? Math.round(tracked.speed * 0.7 + instantaneousSpeed * 0.3) : instantaneousSpeed;
-
-            tracked.x1 = curr.x1;
-            tracked.y1 = curr.y1;
-            tracked.x2 = curr.x2;
-            tracked.y2 = curr.y2;
-            tracked.centerX = curr.centerX;
-            tracked.centerY = curr.centerY;
-            tracked.lane = curr.lane;
-            tracked.assigned = true;
-
-            // Đệ trình đếm xe khi phương tiện di chuyển qua nửa khung hình theo chiều dọc
-            const countingLineY = frameHeight / 2;
-            if (!tracked.counted && tracked.centerY > countingLineY) {
-                tracked.counted = true;
-                const cls = tracked.class;
-                if (vehicleStats[cls]) {
-                    if (tracked.lane === 'left') {
-                        vehicleStats[cls].left++;
-                    } else {
-                        vehicleStats[cls].right++;
+            // Xử lý logic đếm khi xe cắt qua vạch đếm (lineY)
+            // lineY mặc định hoặc vị trí vạch ngang trên màn hình
+            let countingLine = lineY || (canvasHeight / 2);
+            
+            if (!countedTrackIDs.has(matchedID)) {
+                // Kiểm tra nếu xe đi từ trên xuống hoặc dưới lên cắt qua vạch đếm
+                if ((oldY < countingLine && newY >= countingLine) || (oldY > countingLine && newY <= countingLine)) {
+                    let type = item.className;
+                    if (vehicleStats[type]) {
+                        // Phân làn trái / phải dựa vào vị trí trục X so với tâm màn hình
+                        let isLeft = cx < (canvasWidth / 2);
+                        
+                        if (isLeft) {
+                            vehicleStats[type].left++;
+                        } else {
+                            vehicleStats[type].right++;
+                        }
+                        vehicleStats[type].total++;
+                        
+                        countedTrackIDs.add(matchedID);
+                        trackedObjects[matchedID].counted = true;
                     }
-                    vehicleStats[cls].total = vehicleStats[cls].left + vehicleStats[cls].right;
                 }
             }
 
-            updatedTrackedVehicles.set(bestMatchId, tracked);
+            trackedObjects[matchedID].centroid = [cx, cy];
+            trackedObjects[matchedID].lastSeen = 0;
         } else {
-            // Cấp ID mới cho xe xuất hiện lần đầu
-            const newId = nextVehicleId++;
-            updatedTrackedVehicles.set(newId, {
-                ...curr,
-                id: newId,
-                speed: 0,
+            // Đăng ký đối tượng mới xuất hiện
+            trackedObjects[nextObjectID] = {
+                centroid: [cx, cy],
+                className: item.className,
                 counted: false,
-                assigned: true
-            });
+                lastSeen: 0
+            };
+            nextObjectID++;
         }
     });
 
-    trackedVehicles = updatedTrackedVehicles;
-
-    const resultList = [];
-    trackedVehicles.forEach(v => resultList.push(v));
-    return resultList;
+    // Dọn dẹp các đối tượng đã biến mất khỏi khung hình quá lâu
+    Object.keys(trackedObjects).forEach(id => {
+        trackedObjects[id].lastSeen++;
+        if (trackedObjects[id].lastSeen > 15) { // Quá 15 khung hình không thấy thì xóa
+            delete trackedObjects[id];
+        }
+    });
 }
